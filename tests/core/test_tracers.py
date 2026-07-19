@@ -17,6 +17,7 @@ from policyengine_core.tracers import (
     TraceNode,
     TracingParameterNodeAtInstant,
 )
+from policyengine_core.tracers.full_tracer import parse_trace_key
 
 from .parameters_fancy_indexing.test_fancy_indexing import parameters
 
@@ -529,3 +530,152 @@ def test_browse_trace():
 
     browsed_nodes = [node.name for node in tracer.browse_trace()]
     assert browsed_nodes == ["B", "C", "D", "E", "F"]
+
+
+def test_to_trace_versioned_export():
+    tracer = FullTracer()
+    tracer.record_calculation_start("income_tax", 2017)
+    tracer.record_calculation_start("salary", 2017)
+    tracer.record_calculation_result(np.asarray([2000]))
+    tracer.record_calculation_end()
+    tracer.record_parameter_access("taxes.rate", "2017-01-01", "default", 0.15)
+    tracer.record_calculation_result(np.asarray([300]))
+    tracer.record_calculation_end()
+
+    trace = tracer.to_trace()
+
+    assert trace["format"] == "policyengine.trace.v1"
+    assert trace["engine"]["package"] == "policyengine-core"
+    assert "version" in trace["engine"]
+    assert trace["calculation"]["roots"] == [
+        {
+            "id": "income_tax<2017, (default)>",
+            "variable": "income_tax",
+            "period": "2017",
+            "branch": "default",
+        }
+    ]
+
+    nodes_by_id = {node["id"]: node for node in trace["nodes"]}
+    root = nodes_by_id["income_tax<2017, (default)>"]
+    assert root["variable"] == "income_tax"
+    assert root["period"] == "2017"
+    assert root["branch"] == "default"
+    assert root["dependencies"] == ["salary<2017, (default)>"]
+    assert root["value"] == [300]
+    assert "taxes.rate<2017-01-01, (default)>" in root["parameters"]
+    assert root["parameters"]["taxes.rate<2017-01-01, (default)>"] == approx(0.15)
+    assert "calculation_time" in root
+    assert "formula_time" in root
+
+    assert nodes_by_id["salary<2017, (default)>"]["value"] == [2000]
+    assert "taxes.rate<2017-01-01, (default)>" in trace["parameters"]
+    assert (
+        trace["parameters"]["taxes.rate<2017-01-01, (default)>"]["name"] == "taxes.rate"
+    )
+
+
+def test_to_trace_rejects_unknown_format():
+    tracer = FullTracer()
+    tracer.record_calculation_start("salary", 2017)
+    tracer.record_calculation_end()
+
+    with raises(ValueError, match="Unsupported trace format"):
+        tracer.to_trace(format="policyengine.trace.v0")
+
+
+def test_to_trace_includes_optional_model_metadata():
+    tracer = FullTracer()
+    tracer.record_calculation_start("salary", 2017)
+    tracer.record_calculation_end()
+
+    trace = tracer.to_trace(model={"package": "policyengine-us", "version": "0.0.0"})
+    assert trace["model"] == {"package": "policyengine-us", "version": "0.0.0"}
+
+
+def test_simulation_to_trace_requires_full_tracer():
+    simulation = StubSimulation()
+    simulation.tracer = SimpleTracer()
+
+    with raises(ValueError, match="FullTracer"):
+        simulation.to_trace()
+
+
+def test_simulation_to_trace_exports_full_tracer_document():
+    simulation = StubSimulation()
+    simulation.tracer = FullTracer()
+    simulation.tax_benefit_system = None
+    simulation.tracer.record_calculation_start("salary", 2017)
+    simulation.tracer.record_calculation_result(np.asarray([1000]))
+    simulation.tracer.record_calculation_end()
+
+    trace = simulation.to_trace(
+        model={"package": "policyengine-us", "version": "1.0.0"}
+    )
+
+    assert trace["format"] == "policyengine.trace.v1"
+    assert trace["model"] == {"package": "policyengine-us", "version": "1.0.0"}
+    assert trace["calculation"]["roots"][0]["variable"] == "salary"
+    assert trace["nodes"][0]["value"] == [1000]
+
+
+def test_simulation_to_trace_infers_model_metadata_from_tax_benefit_system():
+    class FakeCountrySystem:
+        pass
+
+    FakeCountrySystem.__module__ = "policyengine_us.system"
+
+    simulation = StubSimulation()
+    simulation.tracer = FullTracer()
+    simulation.tax_benefit_system = FakeCountrySystem()
+    simulation.tracer.record_calculation_start("salary", 2017)
+    simulation.tracer.record_calculation_end()
+
+    trace = simulation.to_trace()
+
+    assert trace["model"]["package"] == "policyengine-us"
+
+
+def test_simulation_to_trace_skips_core_package_as_model_metadata():
+    class CoreLikeSystem:
+        pass
+
+    CoreLikeSystem.__module__ = "policyengine_core.country_template"
+
+    simulation = StubSimulation()
+    simulation.tracer = FullTracer()
+    simulation.tax_benefit_system = CoreLikeSystem()
+    simulation.tracer.record_calculation_start("salary", 2017)
+    simulation.tracer.record_calculation_end()
+
+    trace = simulation.to_trace()
+    assert "model" not in trace
+
+
+def test_to_trace_reads_structured_fields_from_trace_nodes():
+    """Nodes/parameters come from TraceNode attributes, not key regex parsing."""
+    tracer = FullTracer()
+    tracer.record_calculation_start("income_tax", 2017, branch_name="reform")
+    tracer.record_parameter_access("taxes.rate", "2017-01-01", "reform", 0.2)
+    tracer.record_calculation_result(np.asarray([100]))
+    tracer.record_calculation_end()
+
+    trace = tracer.to_trace()
+    root = trace["nodes"][0]
+    assert root["variable"] == "income_tax"
+    assert root["period"] == "2017"
+    assert root["branch"] == "reform"
+
+    parameter = trace["parameters"]["taxes.rate<2017-01-01, (reform)>"]
+    assert parameter["name"] == "taxes.rate"
+    assert parameter["instant"] == "2017-01-01"
+    assert parameter["branch"] == "reform"
+    assert parameter["value"] == approx(0.2)
+
+
+def test_parse_trace_key_still_available_for_flat_keys():
+    parsed = parse_trace_key("salary<2017, (default)>")
+    assert parsed == {"name": "salary", "period": "2017", "branch": "default"}
+
+    with raises(ValueError, match="Invalid PolicyEngine trace key"):
+        parse_trace_key("not-a-valid-trace-key")
