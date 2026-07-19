@@ -142,6 +142,45 @@ class Holder:
             if default_value is not None:
                 return default_value
 
+    def is_input(self, period: Period, branch_name: str = "default") -> bool:
+        """Return whether this variable was explicitly set as an input.
+
+        Distinguishes user-provided values (including explicit zeros) from
+        values that only exist because a formula ran or a default was applied.
+        Tracking uses the simulation's existing ``_user_input_keys`` set, which
+        :meth:`set_input` already maintains; formula cache writes via
+        :meth:`put_in_cache` are not treated as inputs.
+
+        When ``branch_name`` matches the simulation's current branch, inheritance
+        uses :meth:`Simulation._get_visible_branch_names` (same walk as exportable
+        input periods). Queries for a different branch only check that branch's
+        exact key — they do not walk ``parent_branch``, which is only meaningful
+        relative to the simulation's current branch.
+
+        Note: variables with ``definition_period == ETERNITY`` store inputs under
+        the period key recorded by :meth:`set_input` (often the ETERNITY period
+        itself). Callers that pass a concrete month/year may miss that key until
+        a dedicated ETERNITY canonicalization is added; screener monetary inputs
+        are typically MONTH/YEAR and are unaffected.
+        """
+        simulation = getattr(self, "simulation", None)
+        if simulation is None:
+            return False
+        user_input_keys = getattr(simulation, "_user_input_keys", None)
+        if not user_input_keys:
+            return False
+
+        period = periods.period(period)
+        variable_name = self.variable.name
+
+        if branch_name == getattr(simulation, "branch_name", "default"):
+            for visible_branch in simulation._get_visible_branch_names():
+                if (variable_name, visible_branch, period) in user_input_keys:
+                    return True
+            return False
+
+        return (variable_name, branch_name, period) in user_input_keys
+
     def get_memory_usage(self) -> dict:
         """
         Get data about the virtual memory usage of the holder.
