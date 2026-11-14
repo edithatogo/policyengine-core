@@ -1,3 +1,8 @@
+---
+name: Variable or parameter change
+about: Propose a variable or parameter addition or correction in PolicyEngine Core.
+---
+
 Thanks for filing an issue! Please remove any top-level headers that do not apply.
 
 # Variable to add: name
