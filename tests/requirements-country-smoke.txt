@@ -1,0 +1,8 @@
+# Country fixtures resolved against the checked-out Core 3.30.0 contract.
+# Install these with the local Core package in one transaction so a country
+# dependency cannot replace it with a PyPI Core release.
+policyengine-us==1.771.2
+policyengine-uk==2.90.1
+# Legacy country models require the pre-1.0 SPM API; see
+# https://github.com/PolicyEngine/spm-calculator/blob/main/docs/migration.md
+spm-calculator==0.3.1
